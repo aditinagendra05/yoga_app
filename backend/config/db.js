@@ -14,10 +14,15 @@ let db;
 
 async function connectDB() {
   if (db) return db;
-  await client.connect();
-  db = client.db(process.env.DB_NAME || 'yoga_master');
-  console.log('Connected to MongoDB');
-  return db;
+  try {
+    await client.connect();
+    db = client.db(process.env.DB_NAME || 'yoga_master');
+    console.log('Connected to MongoDB');
+    return db;
+  } catch (error) {
+    console.error('MongoDB connection error:', error.message || error);
+    throw error;
+  }
 }
 
 module.exports = { connectDB };
