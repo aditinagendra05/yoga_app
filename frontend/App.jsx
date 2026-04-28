@@ -1,8 +1,12 @@
 // Yoga Master Frontend — Indian Aesthetic Edition
 // Connect to your backend at http://localhost:5000
-// Uses React + hooks, no external dependencies beyond what's available
+// Uses React + hooks + Stripe
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { loadStripe } from "@stripe/stripe-js";
+import { Elements, CardElement, useStripe, useElements } from "@stripe/react-stripe-js";
+
+const stripePromise = loadStripe("pk_test_51TQqYJHUvciEaQvETL1b4d9vg4G1TG6tlWY5jgN4HPL0BsH0s5AnpA7556Rk0dG3c6uFgHVIQV8I1ohwp4YjK4Ej00hGhumjvY");
 
 const API = "http://localhost:5000";
 
@@ -676,10 +680,128 @@ function InstructorsPage() {
   );
 }
 
+// ─── Stripe Checkout Form ─────────────────────────────────────────────────────
+function CheckoutForm({ auth, items, total, toast, onSuccess, onCancel }) {
+  const stripe = useStripe();
+  const elements = useElements();
+  const [processing, setProcessing] = useState(false);
+  const [cardError, setCardError] = useState("");
+
+  const handlePay = async () => {
+    if (!stripe || !elements) return;
+    setProcessing(true);
+    setCardError("");
+    try {
+      // 1. Create payment intent on backend
+      const { clientSecret } = await apiFetch("/payments/create-intent", {
+        method: "POST",
+        body: JSON.stringify({ price: total })
+      }, auth.token);
+
+      // 2. Confirm card payment with Stripe
+      const { error, paymentIntent } = await stripe.confirmCardPayment(clientSecret, {
+        payment_method: { card: elements.getElement(CardElement) }
+      });
+
+      if (error) {
+        setCardError(error.message);
+        setProcessing(false);
+        return;
+      }
+
+      // 3. Record payment + enroll + clear cart
+      await apiFetch("/payments", {
+        method: "POST",
+        body: JSON.stringify({
+          classesId: items.map(c => c._id),
+          userEmail: auth.user.email,
+          transactionId: paymentIntent.id,
+          amount: total,
+          date: new Date(),
+        })
+      }, auth.token);
+
+      toast("Payment successful! You're enrolled 🎉", "success");
+      onSuccess();
+    } catch (err) {
+      setCardError(err.message);
+      toast(err.message, "error");
+    } finally {
+      setProcessing(false);
+    }
+  };
+
+  return (
+    <div style={{marginTop:'1.5rem',background:'white',borderRadius:'16px',padding:'1.5rem',
+      border:'2px solid rgba(255,107,0,0.2)',boxShadow:'0 4px 20px rgba(255,107,0,0.08)'}}>
+      <h3 style={{fontFamily:'Yatra One, cursive',fontSize:'1.1rem',marginBottom:'1.2rem',color:'var(--dark)'}}>
+        💳 Payment Details
+      </h3>
+
+      {/* Order summary */}
+      <div style={{background:'var(--cream)',borderRadius:'10px',padding:'1rem',marginBottom:'1.2rem'}}>
+        {items.map(cls => (
+          <div key={cls._id} style={{display:'flex',justifyContent:'space-between',fontSize:'0.85rem',
+            padding:'4px 0',borderBottom:'1px solid var(--parchment)'}}>
+            <span style={{color:'var(--mid)'}}>{cls.name}</span>
+            <span style={{fontWeight:700,color:'var(--saffron)'}}>₹{cls.price}</span>
+          </div>
+        ))}
+        <div style={{display:'flex',justifyContent:'space-between',marginTop:'0.6rem',
+          fontWeight:700,fontSize:'0.95rem'}}>
+          <span>Total</span>
+          <span style={{color:'var(--saffron)',fontFamily:'Yatra One, cursive',fontSize:'1.1rem'}}>₹{total.toFixed(2)}</span>
+        </div>
+      </div>
+
+      {/* Stripe Card Element */}
+      <div style={{border:'2px solid var(--parchment)',borderRadius:'10px',padding:'12px 14px',
+        background:'var(--cream)',marginBottom:'1rem',transition:'border-color 0.2s'}}
+        onFocus={e => e.currentTarget.style.borderColor='var(--turmeric)'}
+        onBlur={e => e.currentTarget.style.borderColor='var(--parchment)'}>
+        <CardElement options={{
+          style: {
+            base: {
+              fontSize: '15px',
+              color: '#1C1209',
+              fontFamily: 'Nunito, sans-serif',
+              '::placeholder': { color: '#8B6542' },
+            },
+            invalid: { color: '#C0392B' },
+          },
+          hidePostalCode: true,
+        }} />
+      </div>
+
+      <p style={{fontSize:'0.75rem',color:'var(--light-text)',marginBottom:'1rem'}}>
+        🔒 Test card: <strong>4242 4242 4242 4242</strong> · Any future date · Any CVC
+      </p>
+
+      {cardError && <p className="form-error" style={{marginBottom:'0.8rem'}}>⚠️ {cardError}</p>}
+
+      <div style={{display:'flex',gap:'0.8rem'}}>
+        <button className="form-btn" onClick={handlePay} disabled={processing || !stripe}
+          style={{flex:2}}>
+          {processing ? "Processing..." : `🙏 Pay ₹${total.toFixed(2)}`}
+        </button>
+        <button onClick={onCancel} disabled={processing}
+          style={{flex:1,background:'none',border:'2px solid var(--parchment)',borderRadius:'12px',
+            cursor:'pointer',fontFamily:'Nunito, sans-serif',fontSize:'0.9rem',color:'var(--light-text)',
+            transition:'all 0.2s'}}
+          onMouseOver={e => e.currentTarget.style.borderColor='var(--turmeric)'}
+          onMouseOut={e => e.currentTarget.style.borderColor='var(--parchment)'}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ─── Cart Page ────────────────────────────────────────────────────────────────
-function CartPage({ auth, toast, cartCount, onCartUpdate }) {
+function CartPage({ auth, toast, cartCount, onCartUpdate, onEnrolled }) {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [showCheckout, setShowCheckout] = useState(false);
 
   const loadCart = useCallback(async () => {
     if (!auth) return setLoading(false);
@@ -702,9 +824,22 @@ function CartPage({ auth, toast, cartCount, onCartUpdate }) {
 
   const total = items.reduce((s, c) => s + parseFloat(c.price || 0), 0);
 
+  const handlePaymentSuccess = () => {
+    setShowCheckout(false);
+    setItems([]);
+    onCartUpdate();
+    if (onEnrolled) onEnrolled();
+  };
+
   if (!auth) return <div className="empty"><span className="empty-icon">🔐</span><p>Sign in to view your cart.</p></div>;
   if (loading) return <div className="loading"><div className="spinner"/></div>;
-  if (!items.length) return <div className="empty"><span className="empty-icon">🛒</span><p>Your cart is empty.</p><p style={{fontSize:'0.85rem',marginTop:'0.5rem',color:'var(--light-text)'}}>Add some classes to get started!</p></div>;
+  if (!items.length) return (
+    <div className="empty">
+      <span className="empty-icon">🛒</span>
+      <p>Your cart is empty.</p>
+      <p style={{fontSize:'0.85rem',marginTop:'0.5rem',color:'var(--light-text)'}}>Add some classes to get started!</p>
+    </div>
+  );
 
   return (
     <div style={{maxWidth:600}}>
@@ -719,19 +854,40 @@ function CartPage({ auth, toast, cartCount, onCartUpdate }) {
             <p className="cart-item-instructor">{cls.instructorName}</p>
           </div>
           <span className="cart-item-price">₹{cls.price}</span>
-          <button className="cart-remove" onClick={() => remove(cls._id)}>✕</button>
+          <button className="cart-remove" onClick={() => remove(cls._id)} disabled={showCheckout}>✕</button>
         </div>
       ))}
+
       <div className="cart-total-box">
         <span className="cart-total-label">Total Amount</span>
         <span className="cart-total-amount">₹{total.toFixed(2)}</span>
       </div>
-      <button className="btn-primary" style={{marginTop:'1rem',padding:'13px 32px',width:'100%',borderRadius:'12px',fontSize:'1rem'}}>
-        🙏 Proceed to Checkout
-      </button>
-      <p style={{textAlign:'center',fontSize:'0.78rem',color:'var(--light-text)',marginTop:'0.8rem'}}>
-        Powered by Stripe — Secure payments
-      </p>
+
+      {!showCheckout && (
+        <>
+          <button className="btn-primary"
+            style={{marginTop:'1rem',padding:'13px 32px',width:'100%',borderRadius:'12px',fontSize:'1rem'}}
+            onClick={() => setShowCheckout(true)}>
+            🙏 Proceed to Checkout
+          </button>
+          <p style={{textAlign:'center',fontSize:'0.78rem',color:'var(--light-text)',marginTop:'0.8rem'}}>
+            🔒 Powered by Stripe — Secure payments
+          </p>
+        </>
+      )}
+
+      {showCheckout && (
+        <Elements stripe={stripePromise}>
+          <CheckoutForm
+            auth={auth}
+            items={items}
+            total={total}
+            toast={toast}
+            onSuccess={handlePaymentSuccess}
+            onCancel={() => setShowCheckout(false)}
+          />
+        </Elements>
+      )}
     </div>
   );
 }
@@ -1109,10 +1265,13 @@ export default function App() {
         <div className="section">
           <h2 className="section-title">🛒 Your Cart</h2>
           <p className="section-sub">Review your selected classes</p>
-          <CartPage auth={auth} toast={toast} cartCount={cartCount} onCartUpdate={() => {
-            if (auth) apiFetch(`/cart/${encodeURIComponent(auth.user.email)}`, {}, auth.token)
-              .then(d => setCartCount(d.length)).catch(() => {});
-          }} />
+          <CartPage auth={auth} toast={toast} cartCount={cartCount}
+            onCartUpdate={() => {
+              if (auth) apiFetch(`/cart/${encodeURIComponent(auth.user.email)}`, {}, auth.token)
+                .then(d => setCartCount(d.length)).catch(() => {});
+            }}
+            onEnrolled={() => setPage("enrolled")}
+          />
         </div>
       )}
 
